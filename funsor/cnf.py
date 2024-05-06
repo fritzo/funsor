@@ -29,7 +29,6 @@ from funsor.terms import (
     Subs,
     Unary,
     Variable,
-    to_funsor,
 )
 from funsor.typing import Variadic
 from funsor.util import broadcast_shape, get_backend, quote
@@ -212,15 +211,6 @@ class Contraction(Funsor):
                 result, names
             )  # raise NotImplementedError("TODO align all terms")
         return result
-
-    def _alpha_convert(self, alpha_subs):
-        reduced_vars = frozenset(
-            to_funsor(alpha_subs.get(var.name, var), var.output)
-            for var in self.reduced_vars
-        )
-        alpha_subs = {k: to_funsor(v, self.bound[k]) for k, v in alpha_subs.items()}
-        red_op, bin_op, _, terms = super()._alpha_convert(alpha_subs)
-        return red_op, bin_op, reduced_vars, terms
 
 
 GaussianMixture = Contraction[

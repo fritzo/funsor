@@ -124,3 +124,11 @@ def test_sample_independent():
     actual = Independent(f, "x", "i", "x_i")
     assert actual.sample("i")
     assert actual.sample("j", {"i": 2})
+
+
+def test_subs_already_bound():
+    with reflect:
+        x = Variable("x", Real)
+        y1 = (2 * x)(x=3)
+        y2 = y1.arg(4)
+    assert y1.bound != y2.bound

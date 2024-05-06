@@ -102,22 +102,18 @@ def substitute(expr, subs):
     return env[expr]
 
 
-def _alpha_mangle(expr):
+def _alpha_mangle(bound_vars):
     """
     Rename bound variables in expr to avoid conflict with any free variables.
-
-    FIXME this does not avoid conflict with other bound variables.
+    Returns substitution dictionary with mangled names for consumption by Funsor._alpha_convert.
     """
-    alpha_subs = {
-        name: interpreter.gensym(name + "__BOUND")
-        for name in expr.bound
-        if "__BOUND" not in name
+    return {
+        name: interpreter.gensym(name.split("__BOUND_")[0] + "__BOUND_")
+        for name in bound_vars
     }
-    if not alpha_subs:
-        return expr
 
-    ast_values = instrument.debug_logged(expr._alpha_convert)(alpha_subs)
-    return reflect.interpret(type(expr), *ast_values)
+
+_SKIP_ALPHA = False
 
 
 @reflect.set_callable
@@ -143,6 +139,29 @@ def reflect(cls, *args, **kwargs):
     result = super(FunsorMeta, cls_specific).__call__(*args)
     result._ast_values = args
 
+    # alpha-convert eagerly upon binding any variable.
+    global _SKIP_ALPHA
+    if result.bound and not _SKIP_ALPHA:
+        alpha_subs = _alpha_mangle(result.bound)
+        try:
+            # optimization: don't perform alpha-conversion again
+            # when renaming subexpressions of result
+            _SKIP_ALPHA = True
+            alpha_mangled_args = reflect(result._alpha_convert)(alpha_subs)
+        finally:
+            _SKIP_ALPHA = False
+
+        # TODO eliminate code duplication below
+        # this is currently necessary because .bound is computed in __init__().
+        result = super(FunsorMeta, cls_specific).__call__(*alpha_mangled_args)
+        result._ast_values = alpha_mangled_args
+
+        # we also make the old cons cache_key point to the new mangled value.
+        # this guarantees that alpha-conversion only runs once for this expression.
+        cls._cons_cache[cache_key] = result
+
+        cache_key = reflect.make_hash_key(cls, *alpha_mangled_args)
+
     if instrument.PROFILE:
         size, depth, width = _get_ast_stats(result)
         instrument.COUNTERS["ast_size"][size] += 1
@@ -150,9 +169,6 @@ def reflect(cls, *args, **kwargs):
         classname = get_origin(cls).__name__
         instrument.COUNTERS["funsor"][classname] += 1
         instrument.COUNTERS[classname][width] += 1
-
-    # alpha-convert eagerly upon binding any variable
-    result = _alpha_mangle(result)
 
     cls._cons_cache[cache_key] = result
     return result
@@ -328,9 +344,9 @@ class Funsor(object, metaclass=FunsorMeta):
         Rename bound variables while preserving all free variables.
         """
         # Substitute all funsor values.
-        # Subclasses must handle string conversion.
         assert set(alpha_subs).issubset(self.bound)
-        return tuple(substitute(v, alpha_subs) for v in self._ast_values)
+        alpha_subs = {k: to_funsor(v, self.bound[k]) for k, v in alpha_subs.items()}
+        return substitute(self._ast_values, alpha_subs)
 
     def __call__(self, *args, **kwargs):
         """
@@ -1125,14 +1141,6 @@ class Reduce(Funsor):
             str(self.arg), self.op.__name__, ", ".join(rvars)
         )
 
-    def _alpha_convert(self, alpha_subs):
-        alpha_subs = {
-            k: to_funsor(v, self.arg.inputs[k]) for k, v in alpha_subs.items()
-        }
-        op, arg, reduced_vars = super()._alpha_convert(alpha_subs)
-        reduced_vars = frozenset(alpha_subs.get(var.name, var) for var in reduced_vars)
-        return op, arg, reduced_vars
-
 
 def _reduce_unrelated_vars(op, arg, reduced_vars):
     factor_vars = reduced_vars - arg.input_vars
@@ -1272,12 +1280,6 @@ class Scatter(Funsor):
         self.subs = subs
         self.source = source
         self.reduced_vars = reduced_vars
-
-    def _alpha_convert(self, alpha_subs):
-        alpha_subs = {k: to_funsor(v, self.bound[k]) for k, v in alpha_subs.items()}
-        op, subs, source, reduced_vars = super()._alpha_convert(alpha_subs)
-        reduced_vars = frozenset(alpha_subs.get(var.name, var) for var in reduced_vars)
-        return op, subs, source, reduced_vars
 
     def eager_subs(self, subs):
         subs = OrderedDict(subs)
@@ -1767,12 +1769,6 @@ class Lambda(Funsor):
         super(Lambda, self).__init__(inputs, output, fresh, bound)
         self.var = var
         self.expr = expr
-
-    def _alpha_convert(self, alpha_subs):
-        alpha_subs = {
-            k: to_funsor(v, self.var.inputs[k]) for k, v in alpha_subs.items()
-        }
-        return super()._alpha_convert(alpha_subs)
 
 
 @eager.register(Binary, GetitemOp, Lambda, (Funsor, Align))
