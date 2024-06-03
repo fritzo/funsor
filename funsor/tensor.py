@@ -481,6 +481,10 @@ class Tensor(Funsor, metaclass=TensorMeta):
         return substitute(x, subs)
 
 
+def materialize(x):
+    return Tensor(get_default_prototype()).materialize(x)
+
+
 @to_funsor.register(np.ndarray)
 @to_funsor.register(np.generic)
 def tensor_to_funsor(x, output=None, dim_to_name=None):
@@ -1255,5 +1259,6 @@ __all__ = [
     "align_tensors",
     "function",
     "ignore_jit_warnings",
+    "materialize",
     "tensordot",
 ]
