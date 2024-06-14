@@ -4,6 +4,7 @@
 import ast
 import functools
 import inspect
+import itertools
 
 from . import ops
 
@@ -46,6 +47,7 @@ class OpTransformer(ast.NodeTransformer):
         self.infix = {INFIX_TO_NODE[k]: v for k, v in infix.items()}
         self.prefix = {PREFIX_TO_NODE[k]: v for k, v in prefix.items()}
         self.const = const
+        super().__init__()
 
     def visit_Constant(self, node):
         node = self.generic_visit(node)
@@ -131,38 +133,105 @@ def rewrite_ops(infix={}, prefix={}, const={}):
     transformer = OpTransformer(infix, prefix, const)
 
     def decorator(fn):
-        source = inspect.getsource(fn)
-
-        # Strip indentation and all decorators.
-        indent = len(source) - len(source.lstrip())
-        lines = []
-        discard = True
-        for line in source.split("\n"):
-            line = line[indent:]
-            if discard:
-                if line.startswith("def "):
-                    discard = False
-                else:
-                    continue
-            lines.append(line)
-        source = "\n".join(lines)
-        assert source
-
-        # Transform the function.
-        a = ast.parse(source)
+        a = decompile_def(fn)
         a_t = transformer.visit(a)
-        source_t = ast.unparse(a_t)
-        result = {}
-        exec(source_t, globals(), result)
-        fn_t = result[fn.__name__]
-        functools.update_wrapper(fn_t, fn)
+        fn_t = recompile_def(fn, a_t)
         return fn_t
 
     return decorator
 
 
+def _find_names(count, avoid):
+    """
+    Finds count-many distincy variable names, avoiding names in ``avoid``.
+
+    :param avoid: A collection of names to avoid.
+    :returns: A variable name something like "_bound_123"
+    :rtype: str
+    """
+    assert isinstance(count, int) and count >= 0
+    result = []
+    for i in itertools.count():
+        if len(result) == count:
+            return result
+        name = f"_bound_{i}"
+        if name not in avoid:
+            result.append(name)
+
+
+def alpha_rename(fn=None, locals_=None):
+    """
+    Rename all position-only arguments in a function.
+    """
+    if fn is None:
+        return functools.partial(alpha_rename, locals_=locals_)
+
+    # Create a canonical alpha renaming.
+    sig = inspect.signature(fn)
+    old_names = {
+        name for name, p in sig.parameters.items() if p.kind == p.POSITIONAL_ONLY
+    }
+    avoid = set(fn.__code__.co_varnames) - old_names
+    new_names = _find_names(len(old_names), avoid)
+    rename = dict(zip(old_names, new_names))
+
+    # Rename variables in-place.
+    a = decompile_def(fn)
+    for node in ast.walk(a):
+        if isinstance(node, ast.FunctionDef):
+            for arg in node.args.posonlyargs:
+                arg.arg = rename.get(arg.arg, arg.arg)
+        elif isinstance(node, ast.Name):
+            node.id = rename.get(node.id, node.id)
+    fn_t = recompile_def(fn, a, locals_)
+    return fn_t
+
+
+def decompile_def(fn):
+    """
+    Decompile a function definition to an ast, dropping all decorators.
+
+    :param callable fn:
+    :returns: an ast representation of ``fn``
+    :rtype: ast.Module
+    """
+    source = inspect.getsource(fn)
+
+    # Strip indentation and all decorators.
+    indent = len(source) - len(source.lstrip())
+    lines = []
+    discard = True
+    for line in source.split("\n"):
+        line = line[indent:]
+        if discard:
+            if line.startswith("def "):
+                discard = False
+            else:
+                continue
+        lines.append(line)
+    source = "\n".join(lines)
+    assert source
+
+    return ast.parse(source)
+
+
+def recompile_def(fn, a, locals_=None):
+    """
+    Recompile the ast ``a`` to function like ``fn``.
+    """
+    if locals_ is None:
+        locals_ = {}
+    source = ast.unparse(a)
+    exec(source, globals(), locals_)
+    fn_t = locals_[fn.__name__]
+    functools.update_wrapper(fn_t, fn, assigned=("__module__",), updated=())
+    return fn_t
+
+
 __all__ = [
     "INFIX_OPERATORS",
     "PREFIX_OPERATORS",
+    "decompile_def",
+    "recompile_def",
     "rewrite_ops",
 ]

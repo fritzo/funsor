@@ -7,7 +7,7 @@ import sys
 import pytest
 
 from funsor import ops
-from funsor.syntax import rewrite_ops
+from funsor.syntax import alpha_rename, rewrite_ops
 
 python_version = tuple(map(int, sys.version.split()[0].split(".")[:2]))
 
@@ -16,6 +16,7 @@ def assert_fn_eq(actual, expected):
     assert actual.__name__ == expected.__name__
     assert actual.__doc__ == expected.__doc__
     assert actual.__module__ == expected.__module__
+    assert actual.__closure__ == expected.__closure__
     assert actual.__code__.co_code == expected.__code__.co_code
 
 
@@ -106,3 +107,41 @@ def test_complex():
 
     args = (ops.mul, ops.mul, 1.23, 4.56, 7.89)
     assert actual(*args) == expected(*args)
+
+
+def test_alpha_rename_1():
+    @alpha_rename
+    def fn(a, b, /, c, d=1):
+        e = a + b
+        return c + d + e
+
+    actual = fn
+
+    def fn(_bound_0, _bound_1, /, c, d=1):
+        e = _bound_0 + _bound_1
+        return c + d + e
+
+    expected = fn
+    assert_fn_eq(actual, expected)
+
+    assert actual(1, 2, 3, 4) == expected(1, 2, 3, 4)
+
+
+@pytest.mark.xfail(reason="failure to reproduce enclosing scope")
+def test_alpha_rename_2():
+    @alpha_rename(locals_=locals())
+    def fn(a, b, /, c, d=1):
+        e = a + b
+        return c + d + e + f
+
+    actual = fn
+
+    def fn(_bound_0, _bound_1, /, c, d=1):
+        e = _bound_0 + _bound_1
+        return c + d + e + f
+
+    expected = fn
+    assert_fn_eq(actual, expected)
+
+    f = 0
+    assert actual(1, 2, 3, 4) == expected(1, 2, 3, 4)
